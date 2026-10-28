@@ -1,0 +1,16 @@
+server {
+    listen 8080;
+    server_name {{ zabbix_frontend_server_name }};
+    root /usr/share/zabbix;
+    index index.php;
+    location = /healthz { access_log off; return 200 "ok\n"; }
+    location / { try_files $uri $uri/ =404; }
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/zabbix.sock;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_index index.php;
+        fastcgi_param DOCUMENT_ROOT /usr/share/zabbix;
+        fastcgi_param SCRIPT_FILENAME /usr/share/zabbix$fastcgi_script_name;
+        include fastcgi_params;
+    }
+}

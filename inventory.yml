@@ -1,0 +1,16 @@
+all:
+  children:
+    zabbix_servers:
+      hosts:
+        zbx01:
+          ansible_host: 10.10.10.11
+          ha_node_name: zbx01
+          ha_node_address: 10.10.10.11:10051
+        zbx02:
+          ansible_host: 10.10.10.12
+          ha_node_name: zbx02
+          ha_node_address: 10.10.10.12:10051
+    load_balancers:
+      hosts:
+        zbx-lb01:
+          ansible_host: 10.10.10.10

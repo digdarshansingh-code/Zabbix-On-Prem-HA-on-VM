@@ -1,0 +1,26 @@
+---
+- name: Validate Zabbix HA installation
+  hosts: zabbix_servers
+  become: true
+  tasks:
+    - name: Collect service facts
+      ansible.builtin.service_facts:
+    - name: Validate services
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['zabbix-server.service'].state == 'running'
+          - ansible_facts.services['nginx.service'].state == 'running'
+          - ansible_facts.services['php8.3-fpm.service'].state == 'running'
+    - name: Read native HA cluster status
+      ansible.builtin.command: zabbix_server -R ha_status
+      register: ha_status
+      changed_when: false
+      run_once: true
+    - name: Show HA status
+      ansible.builtin.debug:
+        var: ha_status.stdout_lines
+      run_once: true
+    - name: Validate frontend health endpoint
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/healthz
+        status_code: 200

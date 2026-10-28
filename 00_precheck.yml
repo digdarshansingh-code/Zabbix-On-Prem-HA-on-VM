@@ -1,0 +1,74 @@
+---
+- name: Validate Zabbix HA prerequisites
+  hosts: zabbix_servers:load_balancers
+  gather_facts: true
+  become: true
+  tasks:
+    - name: Require Ubuntu 24.04
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_version is version('24.04', '>=')
+          - ansible_architecture in ['x86_64', 'aarch64']
+        fail_msg: "Supported target is Ubuntu 24.04 or later on amd64/arm64."
+
+    - name: Calculate root free space in GB
+      ansible.builtin.set_fact:
+        root_free_gb: "{{ ((ansible_mounts | selectattr('mount','equalto','/') | map(attribute='size_available') | first | int) / 1073741824) | int }}"
+
+    - name: Validate CPU, memory and disk baseline
+      ansible.builtin.assert:
+        that:
+          - ansible_processor_vcpus | int >= 2
+          - ansible_memtotal_mb | int >= minimum_memory_mb | int
+          - root_free_gb | int >= minimum_root_free_gb | int
+        fail_msg: "Baseline failed: need >=2 vCPU, >={{ minimum_memory_mb }} MB RAM and >={{ minimum_root_free_gb }} GB free on /."
+
+    - name: Validate sudo access
+      ansible.builtin.command: /usr/bin/id -u
+      changed_when: false
+      register: id_result
+      failed_when: id_result.stdout != '0'
+
+    - name: Validate DNS resolution for frontend name
+      ansible.builtin.command: "getent hosts {{ zabbix_frontend_server_name }}"
+      changed_when: false
+      register: dns_check
+      failed_when: false
+
+    - name: Validate PostgreSQL TCP reachability from Zabbix nodes
+      ansible.builtin.wait_for:
+        host: "{{ zabbix_db_host }}"
+        port: "{{ zabbix_db_port }}"
+        timeout: 5
+        state: started
+      when: inventory_hostname in groups['zabbix_servers']
+
+    - name: Validate Zabbix repository URL
+      ansible.builtin.uri:
+        url: "{{ zabbix_repo_deb }}"
+        method: HEAD
+        status_code: [200, 302]
+        timeout: 15
+      when: inventory_hostname in groups['zabbix_servers']
+
+    - name: Check time synchronization
+      ansible.builtin.command: timedatectl show -p NTPSynchronized --value
+      changed_when: false
+      register: ntp_state
+      failed_when: ntp_state.stdout | trim != 'yes'
+
+    - name: Write validation marker
+      ansible.builtin.copy:
+        dest: /var/tmp/zabbix_ha_precheck.ok
+        mode: '0600'
+        content: "validated={{ ansible_date_time.iso8601 }}
+host={{ inventory_hostname }}
+"
+
+    - name: Show validation summary
+      ansible.builtin.debug:
+        msg:
+          - "PASS: {{ inventory_hostname }}"
+          - "CPU={{ ansible_processor_vcpus }}, RAM={{ ansible_memtotal_mb }} MB, root_free={{ root_free_gb }} GB"
+          - "DNS check rc={{ dns_check.rc | default('not-run') }}"

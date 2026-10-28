@@ -1,0 +1,131 @@
+---
+- name: Install and configure Zabbix native HA nodes
+  hosts: zabbix_servers
+  serial: 1
+  become: true
+  gather_facts: true
+  handlers:
+    - name: Restart Zabbix server
+      ansible.builtin.service:
+        name: zabbix-server
+        state: restarted
+    - name: Restart Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: restarted
+  tasks:
+    - name: Require successful prerequisite marker
+      ansible.builtin.stat:
+        path: /var/tmp/zabbix_ha_precheck.ok
+      register: precheck_marker
+
+    - name: Stop when prerequisite validation was not completed
+      ansible.builtin.assert:
+        that: precheck_marker.stat.exists
+        fail_msg: "Run 00_precheck.yml successfully before installation."
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name: [ca-certificates, curl, gnupg, postgresql-client, python3-psycopg2]
+        state: present
+        update_cache: true
+
+    - name: Download Zabbix repository package
+      ansible.builtin.get_url:
+        url: "{{ zabbix_repo_deb }}"
+        dest: /tmp/zabbix-release.deb
+        mode: '0644'
+
+    - name: Install Zabbix repository package
+      ansible.builtin.apt:
+        deb: /tmp/zabbix-release.deb
+
+    - name: Install Zabbix server, frontend and agent
+      ansible.builtin.apt:
+        name:
+          - zabbix-server-pgsql
+          - zabbix-frontend-php
+          - php8.3-pgsql
+          - zabbix-nginx-conf
+          - zabbix-sql-scripts
+          - zabbix-agent2
+        state: present
+        update_cache: true
+
+    - name: Check whether Zabbix schema exists
+      ansible.builtin.shell: |
+        PGPASSWORD='{{ zabbix_db_password }}' psql -h '{{ zabbix_db_host }}' -p '{{ zabbix_db_port }}' -U '{{ zabbix_db_user }}' -d '{{ zabbix_db_name }}' -tAc "select 1 from information_schema.tables where table_schema='public' and table_name='users';"
+      args:
+        executable: /bin/bash
+      register: schema_check
+      changed_when: false
+      no_log: true
+      run_once: true
+
+    - name: Import initial schema once
+      ansible.builtin.shell: |
+        set -o pipefail
+        zcat /usr/share/zabbix-sql-scripts/postgresql/server.sql.gz | PGPASSWORD='{{ zabbix_db_password }}' psql -h '{{ zabbix_db_host }}' -p '{{ zabbix_db_port }}' -U '{{ zabbix_db_user }}' -d '{{ zabbix_db_name }}'
+      args:
+        executable: /bin/bash
+      when: schema_check.stdout | trim != '1'
+      no_log: true
+      run_once: true
+
+    - name: Configure Zabbix server HA
+      ansible.builtin.template:
+        src: templates/zabbix_server.conf.j2
+        dest: /etc/zabbix/zabbix_server.conf
+        owner: root
+        group: zabbix
+        mode: '0640'
+      notify: Restart Zabbix server
+
+    - name: Configure Nginx frontend
+      ansible.builtin.template:
+        src: templates/nginx.conf.j2
+        dest: /etc/zabbix/nginx.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart Nginx
+
+    - name: Enable services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop: [zabbix-server, zabbix-agent2, nginx, php8.3-fpm]
+
+- name: Install HAProxy frontend load balancer
+  hosts: load_balancers
+  become: true
+  tasks:
+    - name: Require successful prerequisite marker
+      ansible.builtin.stat:
+        path: /var/tmp/zabbix_ha_precheck.ok
+      register: precheck_marker
+    - ansible.builtin.assert:
+        that: precheck_marker.stat.exists
+        fail_msg: "Run 00_precheck.yml successfully before installation."
+    - name: Install HAProxy
+      ansible.builtin.apt:
+        name: haproxy
+        state: present
+        update_cache: true
+    - name: Configure HAProxy
+      ansible.builtin.template:
+        src: templates/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        mode: '0644'
+      notify: Restart HAProxy
+    - name: Enable HAProxy
+      ansible.builtin.service:
+        name: haproxy
+        enabled: true
+        state: started
+  handlers:
+    - name: Restart HAProxy
+      ansible.builtin.service:
+        name: haproxy
+        state: restarted
